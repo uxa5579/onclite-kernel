@@ -1,0 +1,45 @@
+boot(4).img analysis
+====================
+File: /mnt/data/boot(4).img
+Size: 67108864 bytes (64 MiB)
+SHA256: 6fa03f4c0adbe08af8a6dd465e68ded53863a3eb7d023e51c4d484f5fb572700
+
+Android boot image:
+- Magic: ANDROID!
+- Header version: 1
+- Page size: 2048
+- OS version: Android 11.0.0
+- Security patch encoded: 2024-02
+- Kernel size: 16040304 bytes
+- Ramdisk size: 0 bytes
+- Second stage size: 0 bytes
+- Cmdline: console=ttyMSM0,115200,n8 androidboot.console=ttyMSM0 androidboot.hardware=qcom msm_rtb.filter=0x237 ehci-hcd.park=3 lpm_levels.sleep_disabled=1 androidboot.bootdevice=7824900.sdhci earlycon=msm_serial_dm,0x78af000 firmware_class.path=/vendor/firmware_mnt/image androidboot.usbconfigfs=true loop.max_part=7 buildvariant=userdebug
+
+Kernel:
+- Compressed format: gzip
+- Decompressed image: Linux kernel ARM64 boot executable Image, little-endian, 4K pages
+- Linux version: 4.9.337-Chidori-Kernel
+- Compiler: Android clang version 14.0.2
+- Build string: #1 SMP PREEMPT Sun Jun 30 12:09:08 -03 2024
+- Arch: arm64/aarch64
+- IKCONFIG found and extracted to boot4_kernel_config.txt
+
+DTB:
+- Appended DTB blob size: 4153689 bytes
+- Number of DTB headers found: 17
+- Qualcomm platforms present include MSM8953/SDM450/SDM632 variants.
+
+Config highlights:
+- CONFIG_IKCONFIG=y
+- CONFIG_CGROUPS=y
+- CONFIG_NAMESPACES=y
+- CONFIG_MODULES=y
+- CONFIG_ANDROID_BINDER_IPC=y
+- CONFIG_OVERLAY_FS=y
+- CONFIG_PROC_FS=y
+- CONFIG_SYSFS=y
+- CONFIG_TMPFS=y
+- CONFIG_SECURITY_SELINUX=y
+
+Conclusion:
+- This is a non-GKI Qualcomm 4.9 kernel. ReSuki/SukiSU style integration is theoretically possible, but requires matching kernel source and manual patching/rebuild. boot.img alone is not enough to compile.
