@@ -110,6 +110,10 @@ jobs:
         run: |
           bash scripts/03_apply_sys_reboot_hook.sh
 
+      - name: Disable broken DTBs
+        run: |
+          bash scripts/03_disable_broken_dtbs.sh
+
       - name: Enable ReSukiSU-only config flags
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig }}
