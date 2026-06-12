@@ -106,6 +106,10 @@ jobs:
         run: |
           bash scripts/03_apply_newfstat_ret_hook.sh
 
+      - name: Apply ReSukiSU sys reboot hook
+        run: |
+          bash scripts/03_apply_sys_reboot_hook.sh
+
       - name: Enable ReSukiSU-only config flags
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig }}
