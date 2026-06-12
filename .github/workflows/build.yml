@@ -36,127 +36,15 @@ jobs:
           find . -maxdepth 4 -type f | sort
 
           echo "Fix Windows CRLF and permission:"
-          find scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
-          chmod +x scripts/*.sh
-
-          echo "Scripts:"
-          ls -la scripts
-
-      - name: Install dependencies
-        run: |
-          sudo apt update
-          sudo apt install -y \
-            git \
-            curl \
-            wget \
-            build-essential \
-            bc \
-            bison \
-            flex \
-            libssl-dev \
-            libelf-dev \
-            zip \
-            unzip \
-            python3 \
-            python-is-python3 \
-            clang \
-            lld \
-            llvm \
-            gcc-aarch64-linux-gnu \
-            gcc-arm-linux-gnueabi \
-            cpio \
-            rsync \
-            perl \
-            make
-
-      - name: Fetch kernel source
-        env:
-          SOURCE_REPO: ${{ github.event.inputs.source_repo }}
-          SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
-        run: |
-          bash scripts/01_fetch_sources.sh
-
-      - name: Prepare defconfig
-        env:
-          DEFCONFIG: ${{ github.event.inputs.defconfig }}
-        run: |
-          bash scripts/02_prepare_defconfig.sh
-
-      - name: Integrate ReSukiSU
-        run: |
-          bash scripts/03_integrate_resukisu.sh
-
-      - name: Enable ReSukiSU-only config flags
-        env:
-          DEFCONFIG: ${{ github.event.inputs.defconfig }}
-        run: |
-          bash scripts/04_enable_resukisu_configs.sh
-
-      - name: Build kernel
-        env:
-          DEFCONFIG: ${{ github.event.inputs.defconfig }}
-        run: |
-          bash scripts/05_build_kernel.sh
-
-      - name: Pack AnyKernel3
-        run: |
-          bash scripts/06_pack_anykernel.sh
-
-      - name: Repack raw boot.img
-        run: |
-          bash scripts/07_repack_boot_img.sh
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ReSukiSU-only-onclite-kernel-build
-          path: |
-            dist/*
-            out/.config
-
-name: Build ReSukiSU-only onclite kernel
-
-on:
-  workflow_dispatch:
-    inputs:
-      source_repo:
-        description: "Kernel source repo"
-        required: true
-        default: "https://github.com/onclite/android_kernel_xiaomi_onc.git"
-      source_branch:
-        description: "Kernel source branch, kosongkan jika default"
-        required: false
-        default: ""
-      defconfig:
-        description: "Defconfig name"
-        required: true
-        default: "onclite_defconfig"
-
-jobs:
-  build:
-    runs-on: ubuntu-22.04
-
-    steps:
-      - name: Checkout build kit
-        uses: actions/checkout@v4
-
-      - name: Debug repository files
-        run: |
-          echo "Current directory:"
-          pwd
-
-          echo "Root files:"
-          ls -la
-
-          echo "All files:"
-          find . -maxdepth 4 -type f | sort
-
-          echo "Fix Windows CRLF and permission:"
-          find scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
-          chmod +x scripts/*.sh
-
-          echo "Scripts:"
-          ls -la scripts
+          if [ -d scripts ]; then
+            find scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
+            chmod +x scripts/*.sh
+            echo "Scripts:"
+            ls -la scripts
+          else
+            echo "ERROR: folder scripts tidak ada"
+            exit 1
+          fi
 
       - name: Install dependencies
         run: |
@@ -220,10 +108,12 @@ jobs:
           bash scripts/05_build_kernel.sh 2>&1 | tee build_kernel.log
 
       - name: Pack AnyKernel3
+        if: success()
         run: |
           bash scripts/06_pack_anykernel.sh
 
       - name: Repack raw boot.img
+        if: success()
         run: |
           bash scripts/07_repack_boot_img.sh
 
