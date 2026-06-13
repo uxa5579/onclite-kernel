@@ -140,9 +140,9 @@ jobs:
         run: |
           bash scripts/03_apply_sys_reboot_hook.sh
 
-      - name: Disable broken DTBs
+      - name: Skip broken DTB filter
         run: |
-          bash scripts/03_disable_broken_dtbs.sh
+          echo "Skip DTB filter because Image.gz build reuses original DTB tail."
 
       - name: Enable ReSukiSU-only config flags
         env:
