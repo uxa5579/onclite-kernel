@@ -130,9 +130,7 @@ jobs:
             rm -rf kernel kernel_source source android_kernel_xiaomi_onc android_kernel_xiaomi_onclite
 
             if [ -n "${SOURCE_BRANCH}" ]; then
-              git clone \
-                -b "${SOURCE_BRANCH}" \
-                "${SOURCE_REPO}" kernel
+              git clone -b "${SOURCE_BRANCH}" "${SOURCE_REPO}" kernel
             else
               git clone "${SOURCE_REPO}" kernel
             fi
@@ -155,9 +153,7 @@ jobs:
               echo "KernelSU submodule OK"
             else
               echo "WARNING: KernelSU submodule gagal, fallback clone KernelSU manual"
-
               rm -rf KernelSU
-
               git clone https://github.com/skye-tachyon/KernelSU.git KernelSU || \
               git clone https://github.com/tiann/KernelSU.git KernelSU
             fi
@@ -221,36 +217,22 @@ jobs:
             fi
 
             echo "==> Normalize defconfig newline"
-            python3 - <<PY
-from pathlib import Path
-
-p = Path("${DEFCONFIG_PATH}")
-data = p.read_bytes()
-
-if data and not data.endswith(b"\\n"):
-    p.write_bytes(data + b"\\n")
-    print("Added missing final newline:", p)
-else:
-    print("Final newline OK:", p)
-PY
+            printf '\n' >> "${DEFCONFIG_PATH}"
 
             echo ""
             echo "==> Remove broken vpnhide Kconfig reference"
 
-            if grep -q 'drivers/vpnhide/Kconfig' "${KERNEL_DIR}/drivers/Kconfig"; then
+            if [ -f "${KERNEL_DIR}/drivers/Kconfig" ]; then
               sed -i '/drivers\/vpnhide\/Kconfig/d' "${KERNEL_DIR}/drivers/Kconfig"
-              echo "Removed drivers/vpnhide/Kconfig from drivers/Kconfig"
-            else
-              echo "No drivers/vpnhide/Kconfig reference found"
+              sed -i '/vpnhide/d' "${KERNEL_DIR}/drivers/Kconfig"
             fi
 
             if [ -f "${KERNEL_DIR}/drivers/Makefile" ]; then
               sed -i '/vpnhide/d' "${KERNEL_DIR}/drivers/Makefile"
-              echo "Removed vpnhide from drivers/Makefile if present"
             fi
 
             echo ""
-            echo "==> Remove all old KSU/VPNHIDE related flags from defconfig"
+            echo "==> Remove old KSU/VPNHIDE flags from defconfig"
 
             sed -i '/^CONFIG_VPNHIDE=/d' "${DEFCONFIG_PATH}"
             sed -i '/^# CONFIG_VPNHIDE is not set/d' "${DEFCONFIG_PATH}"
@@ -263,15 +245,6 @@ PY
             set_config() {
               local key="$1"
               local val="$2"
-
-              python3 - <<PY
-from pathlib import Path
-
-p = Path("${DEFCONFIG_PATH}")
-data = p.read_bytes()
-if data and not data.endswith(b"\\n"):
-    p.write_bytes(data + b"\\n")
-PY
 
               sed -i "/^${key}=/d" "${DEFCONFIG_PATH}"
               sed -i "/^# ${key} is not set/d" "${DEFCONFIG_PATH}"
@@ -384,42 +357,39 @@ PY
           fi
 
           python3 - <<'PY'
-import struct
-from pathlib import Path
+          import struct
+          from pathlib import Path
 
-boot_in = Path("dist/ReSukiSU-onclite-4.9-boot.img")
-boot_out = Path("dist/cyberc3dr-KernelSU-onclite-boot-fixed.img")
+          boot_in = Path("dist/ReSukiSU-onclite-4.9-boot.img")
+          boot_out = Path("dist/cyberc3dr-KernelSU-onclite-boot-fixed.img")
 
-data = bytearray(boot_in.read_bytes())
+          data = bytearray(boot_in.read_bytes())
 
-if data[:8] != b"ANDROID!":
-    raise SystemExit("ERROR: bukan Android boot image")
+          if data[:8] != b"ANDROID!":
+              raise SystemExit("ERROR: bukan Android boot image")
 
-def get_u32(off):
-    return struct.unpack_from("<I", data, off)[0]
+          def get_u32(off):
+              return struct.unpack_from("<I", data, off)[0]
 
-def put_u64(off, val):
-    struct.pack_into("<Q", data, off, val)
+          def put_u64(off, val):
+              struct.pack_into("<Q", data, off, val)
 
-header_version = get_u32(40)
+          header_version = get_u32(40)
 
-# Android boot image v1:
-# recovery_dtbo_size   offset 1632, u32
-# recovery_dtbo_offset offset 1636, u64
-if header_version >= 1 and len(data) >= 1648:
-    recovery_dtbo_size = get_u32(1632)
+          if header_version >= 1 and len(data) >= 1648:
+              recovery_dtbo_size = get_u32(1632)
 
-    if recovery_dtbo_size == 0:
-        print("recovery_dtbo_size=0, set recovery_dtbo_offset=0")
-        put_u64(1636, 0)
-    else:
-        print("recovery_dtbo_size bukan 0, offset tidak diubah:", recovery_dtbo_size)
-else:
-    print("header_version < 1 atau header terlalu kecil, tidak perlu fix recovery_dtbo_offset")
+              if recovery_dtbo_size == 0:
+                  print("recovery_dtbo_size=0, set recovery_dtbo_offset=0")
+                  put_u64(1636, 0)
+              else:
+                  print("recovery_dtbo_size bukan 0, offset tidak diubah:", recovery_dtbo_size)
+          else:
+              print("header_version < 1 atau header terlalu kecil, tidak perlu fix recovery_dtbo_offset")
 
-boot_out.write_bytes(data)
-print("Wrote:", boot_out)
-PY
+          boot_out.write_bytes(data)
+          print("Wrote:", boot_out)
+          PY
 
           if [ -f dist/ReSukiSU-onclite-4.9-AnyKernel3.zip ]; then
             cp dist/ReSukiSU-onclite-4.9-AnyKernel3.zip dist/cyberc3dr-KernelSU-onclite-AnyKernel3.zip
