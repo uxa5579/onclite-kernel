@@ -23,7 +23,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     env:
       CCACHE_DIR: /home/runner/.ccache
@@ -41,13 +41,17 @@ jobs:
           echo "Current directory:"
           pwd
 
+          echo ""
           echo "Root files:"
           ls -la
 
+          echo ""
           echo "Fix Windows CRLF and permission:"
           if [ -d scripts ]; then
             find scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
             chmod +x scripts/*.sh
+
+            echo ""
             echo "Scripts:"
             ls -la scripts
           else
@@ -87,7 +91,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: /home/runner/.ccache
-          key: ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}
+          key: ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
             ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-
             ccache-onclite-${{ runner.os }}-
@@ -97,7 +101,7 @@ jobs:
           mkdir -p "$CCACHE_DIR"
           ccache -M 4G
           ccache -z
-          ccache -s
+          ccache -s | tee ccache_stats_before.txt
 
       - name: Fetch kernel source
         env:
@@ -151,6 +155,7 @@ jobs:
           DEFCONFIG: ${{ github.event.inputs.defconfig }}
           USE_CCACHE: "1"
         run: |
+          set +e
           set -o pipefail
 
           bash scripts/05_build_kernel.sh 2>&1 \
@@ -159,9 +164,20 @@ jobs:
               -e '/aarch64-linux-gnu-objdump: Warning: Bogus end-of-siblings/d' \
               -e '/aarch64-linux-gnu-objdump: Warning: Further warnings about bogus/d' \
               -e '/aarch64-linux-gnu-objdump: Warning: DIE at offset/d' \
+              -e '/Unrecognized form: 0x22/d' \
+              -e '/Unrecognized form: 0x23/d' \
+              -e '/Bogus end-of-siblings marker/d' \
             | tee build_kernel.log
 
-          ccache -s | tee ccache_stats.txt
+          BUILD_STATUS=${PIPESTATUS[0]}
+
+          echo ""
+          echo "==> Ccache status after build"
+          ccache -s | tee ccache_stats.txt || true
+
+          echo ""
+          echo "Build status: ${BUILD_STATUS}"
+          exit "${BUILD_STATUS}"
 
       - name: Pack AnyKernel3
         if: success()
@@ -178,7 +194,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: /home/runner/.ccache
-          key: ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}
+          key: ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Upload artifact
         if: always()
@@ -190,3 +206,4 @@ jobs:
             out/.config
             build_kernel.log
             ccache_stats.txt
+            ccache_stats_before.txt
