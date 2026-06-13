@@ -44,58 +44,109 @@ cp "${QCOM_MAKEFILE}" "${QCOM_MAKEFILE}.bak"
 python3 - <<'PY'
 from pathlib import Path
 import re
+import sys
 
-makefile = Path("arch/arm64/boot/dts/qcom/Makefile")
+candidates = [
+    Path("arch/arm64/boot/dts/qcom/Makefile"),
+    Path("kernel/arch/arm64/boot/dts/qcom/Makefile"),
+    Path("kernel_source/arch/arm64/boot/dts/qcom/Makefile"),
+    Path("source/arch/arm64/boot/dts/qcom/Makefile"),
+    Path("android_kernel_xiaomi_onc/arch/arm64/boot/dts/qcom/Makefile"),
+    Path("android_kernel_xiaomi_onclite/arch/arm64/boot/dts/qcom/Makefile"),
+]
 
-if not makefile.exists():
-    makefile = Path("kernel/arch/arm64/boot/dts/qcom/Makefile")
+makefile = None
 
-if not makefile.exists():
+for p in candidates:
+    if p.exists():
+        makefile = p
+        break
+
+if makefile is None:
     found = list(Path(".").glob("*/arch/arm64/boot/dts/qcom/Makefile"))
     if found:
         makefile = found[0]
 
-if not makefile.exists():
-    raise SystemExit("ERROR: qcom Makefile tidak ditemukan")
+if makefile is None:
+    print("ERROR: qcom Makefile tidak ditemukan")
+    sys.exit(1)
 
 text = makefile.read_text(errors="ignore")
 
 broken_patterns = [
-    r"apq8053-lite-dragon[^ \t\n\\]*\.dtb",
-    r"msm8953-pmi8940[^ \t\n\\]*\.dtb",
-    r"apq8053-pmi8940[^ \t\n\\]*\.dtb",
+    "apq8053-lite-dragon",
+
+    # Error lama
+    "msm8953-pmi8940",
+    "apq8053-pmi8940",
+
+    # Error terbaru dari log kamu
+    "msm8953-pmi8937",
+    "apq8053-pmi8937",
 ]
 
-before = text
+print(f"Patch Makefile: {makefile}")
 
-for pat in broken_patterns:
-    text = re.sub(r"[ \t]*" + pat, "", text)
+lines = text.splitlines(keepends=True)
+new_lines = []
 
-# Bersihkan line continuation kosong/aneh
-text = re.sub(r"\\\n[ \t]*\\", r"\\", text)
-text = re.sub(r"\n[ \t]*\n[ \t]*\n+", "\n\n", text)
+for line in lines:
+    original = line
+
+    # Hapus token .dtb yang match pattern rusak
+    for name in broken_patterns:
+        line = re.sub(r'(?<![\w.-])' + re.escape(name) + r'[\w.-]*\.dtb', '', line)
+
+    # Bersihkan spasi berlebihan
+    line = re.sub(r'[ \t]+', ' ', line)
+
+    # Kalau line dtb jadi kosong, buang line-nya
+    stripped = line.strip()
+
+    if stripped in ["\\", ""]:
+        continue
+
+    if re.match(r'^dtb-[^=]+\+=\s*\\?$', stripped):
+        continue
+
+    if re.match(r'^dtb-[^=]+\+=\s*$', stripped):
+        continue
+
+    new_lines.append(line)
+
+text = "".join(new_lines)
+
+# Bersihkan backslash kosong / blank line berlebihan
+text = re.sub(r'\n\s*\\\s*\n', '\n', text)
+text = re.sub(r'\n{3,}', '\n\n', text)
 
 makefile.write_text(text)
 
-print(f"Patched: {makefile}")
-
-for name in [
-    "apq8053-lite-dragon",
-    "msm8953-pmi8940",
-    "apq8053-pmi8940",
-]:
-    if name in text:
-        print(f"WARNING: masih ada {name}")
+for name in broken_patterns:
+    if re.search(re.escape(name) + r'[\w.-]*\.dtb', text):
+        print(f"ERROR: masih ada broken DTB: {name}")
+        sys.exit(1)
     else:
         print(f"OK: {name} sudah tidak ada")
 PY
 
 echo "==> Verify broken DTBs removed"
-grep -nE "apq8053-lite-dragon|msm8953-pmi8940|apq8053-pmi8940" "${QCOM_MAKEFILE}" && {
+
+grep -nE "apq8053-lite-dragon|msm8953-pmi8940|apq8053-pmi8940|msm8953-pmi8937|apq8053-pmi8937" "${QCOM_MAKEFILE}" && {
   echo "ERROR: broken DTB masih ada di Makefile"
   exit 1
 } || {
   echo "OK: broken DTB sudah bersih"
 }
+
+echo "==> Remaining onclite/onc/sdm632 candidates:"
+find "${QCOM_DTS_DIR}" -maxdepth 1 -type f \( \
+  -iname "*onclite*.dts" -o \
+  -iname "*onclite*.dtsi" -o \
+  -iname "*sdm632*.dts" -o \
+  -iname "*sdm632*.dtsi" -o \
+  -iname "*onc*.dts" -o \
+  -iname "*onc*.dtsi" \
+\) | sort || true
 
 echo "==> Broken DTB disable selesai"
