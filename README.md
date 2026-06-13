@@ -18,7 +18,7 @@ Important limitation: this kit cannot magically compile from `boot.img` alone. Y
 4. Enables relevant config flags for non-GKI 4.9.
 5. Optionally tries SUSFS 4.9 patch application.
 6. Builds `Image.gz-dtb` / `Image.gz`.
-7. Packages an AnyKernel3 flashable zip for onclite/onc.
+7. Packages an AnyKernel3 flashable zip for onclite/onc/Redmi 7/ Redmi Y3
 
 
 ## Flashing
