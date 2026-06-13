@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Build ReSukiSU-only kernel"
+echo "==> Build ReSukiSU-only kernel with original DTB tail"
 
 ROOT_DIR="$(pwd)"
 DEFCONFIG="${DEFCONFIG:-onclite_defconfig}"
@@ -37,17 +37,26 @@ DIST_DIR="${ROOT_DIR}/dist"
 mkdir -p "${OUT_DIR}"
 mkdir -p "${DIST_DIR}"
 
-echo "==> Force disable broken DTBs before build"
+ORIGINAL_BOOT=""
 
-cd "${ROOT_DIR}"
+for f in \
+  "${ROOT_DIR}/original_boot.img" \
+  "${ROOT_DIR}/boot.img" \
+  "${ROOT_DIR}/boot_info/original_boot.img" \
+  "${ROOT_DIR}/boot_info/boot.img"; do
+  if [ -f "${f}" ]; then
+    ORIGINAL_BOOT="${f}"
+    break
+  fi
+done
 
-if [ -f "scripts/03_disable_broken_dtbs.sh" ]; then
-  sed -i 's/\r$//' scripts/03_disable_broken_dtbs.sh
-  chmod +x scripts/03_disable_broken_dtbs.sh
-  bash scripts/03_disable_broken_dtbs.sh
-else
-  echo "WARNING: scripts/03_disable_broken_dtbs.sh tidak ada, skip disable broken DTBs."
+if [ -z "${ORIGINAL_BOOT}" ]; then
+  echo "ERROR: original boot.img tidak ditemukan."
+  echo "Upload boot CrDroid kamu ke root repo dengan nama: original_boot.img"
+  exit 1
 fi
+
+echo "Original boot: ${ORIGINAL_BOOT}"
 
 cd "${ROOT_DIR}/${KERNEL_DIR}"
 
@@ -108,10 +117,7 @@ JOBS="$(nproc)"
 echo "Compiler: ${CC_CMD}"
 echo "Jobs    : ${JOBS}"
 
-if command -v clang >/dev/null 2>&1; then
-  echo "Clang version:"
-  clang --version | head -n 3 || true
-fi
+clang --version | head -n 3 || true
 
 if command -v ccache >/dev/null 2>&1; then
   echo "Ccache status before build:"
@@ -119,38 +125,128 @@ if command -v ccache >/dev/null 2>&1; then
 fi
 
 echo "==> Start kernel build"
+echo "Important: building Image.gz only, original DTB will be reused."
 
 make -j"${JOBS}" O="${OUT_DIR}" \
   CC="${CC_CMD}" \
   CLANG_TRIPLE=aarch64-linux-gnu- \
   CROSS_COMPILE=aarch64-linux-gnu- \
   CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-  Image.gz-dtb
+  Image.gz
 
-echo "==> Search build output"
+echo "==> Search Image.gz output"
 
-IMAGE_PATH=""
+IMAGE_GZ=""
 
 for f in \
-  "${OUT_DIR}/arch/arm64/boot/Image.gz-dtb" \
   "${OUT_DIR}/arch/arm64/boot/Image.gz" \
   "${OUT_DIR}/arch/arm64/boot/Image"; do
   if [ -f "${f}" ]; then
-    IMAGE_PATH="${f}"
+    IMAGE_GZ="${f}"
     break
   fi
 done
 
-if [ -z "${IMAGE_PATH}" ]; then
-  echo "ERROR: Kernel image tidak ditemukan."
-  echo "Isi folder boot:"
+if [ -z "${IMAGE_GZ}" ]; then
+  echo "ERROR: Image.gz tidak ditemukan."
   find "${OUT_DIR}/arch/arm64/boot" -maxdepth 3 -type f | sort || true
   exit 1
 fi
 
-echo "Kernel image: ${IMAGE_PATH}"
+echo "Built kernel image: ${IMAGE_GZ}"
 
-cp "${IMAGE_PATH}" "${DIST_DIR}/Image.gz-dtb"
+echo "==> Extract original DTB tail and append to built Image.gz"
+
+export ORIGINAL_BOOT
+export IMAGE_GZ
+export DIST_DIR
+
+python3 - <<'PY'
+import os
+import struct
+import sys
+import zlib
+from pathlib import Path
+
+original_boot = Path(os.environ["ORIGINAL_BOOT"])
+image_gz = Path(os.environ["IMAGE_GZ"])
+dist_dir = Path(os.environ["DIST_DIR"])
+
+dist_dir.mkdir(parents=True, exist_ok=True)
+
+boot = original_boot.read_bytes()
+new_kernel = image_gz.read_bytes()
+
+if boot[:8] != b"ANDROID!":
+    print("ERROR: original_boot.img bukan Android boot image.")
+    sys.exit(1)
+
+def u32(buf, off):
+    return struct.unpack_from("<I", buf, off)[0]
+
+def align(x, page):
+    return ((x + page - 1) // page) * page
+
+kernel_size = u32(boot, 8)
+ramdisk_size = u32(boot, 16)
+page_size = u32(boot, 36)
+header_version = u32(boot, 40)
+
+header_size = page_size
+
+if header_version >= 1 and len(boot) >= 1648:
+    header_size_v1 = u32(boot, 1644)
+    if 0 < header_size_v1 < 65536:
+        header_size = align(header_size_v1, page_size)
+
+kernel_off = align(header_size, page_size)
+kernel_blob = boot[kernel_off:kernel_off + kernel_size]
+
+if not kernel_blob.startswith(b"\x1f\x8b\x08"):
+    print("ERROR: kernel original tidak diawali gzip magic.")
+    print("Kemungkinan format boot tidak sesuai script ini.")
+    sys.exit(1)
+
+d = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+try:
+    _ = d.decompress(kernel_blob)
+except Exception as e:
+    print("ERROR: gagal decompress gzip kernel original:", e)
+    sys.exit(1)
+
+if not d.eof:
+    print("ERROR: gzip kernel original tidak selesai/eof.")
+    sys.exit(1)
+
+dtb_tail = d.unused_data
+
+if len(dtb_tail) < 1024:
+    print("ERROR: DTB tail dari boot original terlalu kecil/kosong.")
+    print("DTB tail size:", len(dtb_tail))
+    sys.exit(1)
+
+if not dtb_tail.startswith(b"\xd0\x0d\xfe\xed"):
+    print("WARNING: DTB tail tidak diawali FDT magic, tapi tetap lanjut.")
+    print("First bytes:", dtb_tail[:16].hex())
+
+out_image = dist_dir / "Image.gz-dtb"
+dtb_out = dist_dir / "original_dtb_tail.bin"
+
+out_image.write_bytes(new_kernel + dtb_tail)
+dtb_out.write_bytes(dtb_tail)
+
+print("Original boot       :", original_boot)
+print("Original kernel size:", kernel_size)
+print("Original ramdisk    :", ramdisk_size)
+print("Page size           :", page_size)
+print("Header version      :", header_version)
+print("New Image.gz size   :", len(new_kernel))
+print("Original DTB tail   :", len(dtb_tail))
+print("Output Image.gz-dtb :", out_image)
+print("Saved DTB tail      :", dtb_out)
+PY
+
 cp "${OUT_DIR}/.config" "${DIST_DIR}/kernel_config_built.txt"
 
 if command -v ccache >/dev/null 2>&1; then
