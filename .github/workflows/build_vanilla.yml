@@ -1,0 +1,138 @@
+name: Test vanilla onclite kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Kernel source repo"
+        required: true
+        default: "https://github.com/onclite/android_kernel_xiaomi_onc.git"
+      source_branch:
+        description: "Kernel source branch, kosongkan jika default"
+        required: false
+        default: ""
+      defconfig:
+        description: "Defconfig name"
+        required: true
+        default: "onclite_defconfig"
+
+concurrency:
+  group: test-vanilla-onclite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    env:
+      CCACHE_DIR: /home/runner/.ccache
+      CCACHE_BASEDIR: /home/runner/work/onclite-kernel/onclite-kernel
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_COMPILERCHECK: content
+      USE_CCACHE: "1"
+
+    steps:
+      - name: Checkout build kit
+        uses: actions/checkout@v4
+
+      - name: Fix scripts permission
+        run: |
+          if [ -d scripts ]; then
+            find scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
+            chmod +x scripts/*.sh
+          else
+            echo "ERROR: folder scripts tidak ada"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            git curl wget build-essential bc bison flex libssl-dev libelf-dev \
+            zip unzip python3 python-is-python3 clang lld llvm \
+            gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi cpio rsync perl make ccache
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-vanilla-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-vanilla-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-
+            ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-
+            ccache-onclite-${{ runner.os }}-
+
+      - name: Setup ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache -M 4G
+          ccache -z
+          ccache -s | tee ccache_stats_before.txt
+
+      - name: Fetch kernel source
+        env:
+          SOURCE_REPO: ${{ github.event.inputs.source_repo }}
+          SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
+        run: |
+          bash scripts/01_fetch_sources.sh
+
+      - name: Prepare defconfig
+        env:
+          DEFCONFIG: ${{ github.event.inputs.defconfig }}
+        run: |
+          bash scripts/02_prepare_defconfig.sh
+
+      - name: Build vanilla kernel
+        env:
+          DEFCONFIG: ${{ github.event.inputs.defconfig }}
+          USE_CCACHE: "1"
+        run: |
+          set +e
+          set -o pipefail
+
+          bash scripts/05_build_kernel.sh 2>&1 \
+            | sed -u \
+              -e '/aarch64-linux-gnu-objdump: Warning: Unrecognized form/d' \
+              -e '/aarch64-linux-gnu-objdump: Warning: Bogus end-of-siblings/d' \
+              -e '/Unrecognized form: 0x22/d' \
+              -e '/Unrecognized form: 0x23/d' \
+              -e '/Bogus end-of-siblings marker/d' \
+            | tee build_kernel.log
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+
+          ccache -s | tee ccache_stats.txt || true
+
+          echo "Build status: ${BUILD_STATUS}"
+          exit "${BUILD_STATUS}"
+
+      - name: Pack AnyKernel3
+        if: success()
+        run: |
+          bash scripts/06_pack_anykernel.sh
+
+      - name: Repack raw boot.img
+        if: success()
+        run: |
+          bash scripts/07_repack_boot_img.sh
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-vanilla-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vanilla-onclite-kernel-test
+          path: |
+            dist/*
+            out/.config
+            build_kernel.log
+            ccache_stats.txt
+            ccache_stats_before.txt
