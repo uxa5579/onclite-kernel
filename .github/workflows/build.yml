@@ -16,9 +16,21 @@ on:
         required: true
         default: "onclite_defconfig"
 
+concurrency:
+  group: build-onclite-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    env:
+      CCACHE_DIR: /home/runner/.ccache
+      CCACHE_BASEDIR: /home/runner/work/onclite-kernel/onclite-kernel
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_COMPILERCHECK: content
+      USE_CCACHE: "1"
 
     steps:
       - name: Checkout build kit
@@ -31,9 +43,6 @@ jobs:
 
           echo "Root files:"
           ls -la
-
-          echo "All files:"
-          find . -maxdepth 4 -type f | sort
 
           echo "Fix Windows CRLF and permission:"
           if [ -d scripts ]; then
@@ -71,7 +80,24 @@ jobs:
             cpio \
             rsync \
             perl \
-            make
+            make \
+            ccache
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-
+            ccache-onclite-${{ runner.os }}-
+
+      - name: Setup ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache -M 4G
+          ccache -z
+          ccache -s
 
       - name: Fetch kernel source
         env:
@@ -123,9 +149,19 @@ jobs:
       - name: Build kernel
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig }}
+          USE_CCACHE: "1"
         run: |
           set -o pipefail
-          bash scripts/05_build_kernel.sh 2>&1 | tee build_kernel.log
+
+          bash scripts/05_build_kernel.sh 2>&1 \
+            | sed -u \
+              -e '/aarch64-linux-gnu-objdump: Warning: Unrecognized form/d' \
+              -e '/aarch64-linux-gnu-objdump: Warning: Bogus end-of-siblings/d' \
+              -e '/aarch64-linux-gnu-objdump: Warning: Further warnings about bogus/d' \
+              -e '/aarch64-linux-gnu-objdump: Warning: DIE at offset/d' \
+            | tee build_kernel.log
+
+          ccache -s | tee ccache_stats.txt
 
       - name: Pack AnyKernel3
         if: success()
@@ -137,6 +173,13 @@ jobs:
         run: |
           bash scripts/07_repack_boot_img.sh
 
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}
+
       - name: Upload artifact
         if: always()
         uses: actions/upload-artifact@v4
@@ -146,3 +189,4 @@ jobs:
             dist/*
             out/.config
             build_kernel.log
+            ccache_stats.txt
