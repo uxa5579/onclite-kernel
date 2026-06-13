@@ -23,7 +23,7 @@ Important limitation: this kit cannot magically compile from `boot.img` alone. Y
 
 ## Flashing
 
-Flash only if you have a backup and know how to recover bootloop.
+Before flashing, make sure you have backed up your `boot.img` in recovery such as Orange Fox or TWRP.
 
 ```bash
 fastboot flash boot boot.img
