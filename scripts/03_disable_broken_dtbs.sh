@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Keep only onclite/SDM632 DTBs"
+echo "==> Keep only onclite/SDM632 DTBs and DTBOs"
 
 ROOT_DIR="$(pwd)"
 KERNEL_DIR=""
@@ -71,53 +71,62 @@ if makefile is None:
     print("ERROR: qcom Makefile tidak ditemukan")
     sys.exit(1)
 
-text = makefile.read_text(errors="ignore")
-
-# Untuk Redmi 7/onclite, target aman adalah SDM632/onclite/onc.
-# Semua DTB board lain seperti msm8953, apq8053, sdm450, sda450 akan dibuang dari build list.
 allowed_prefixes = (
     "sdm632",
     "onclite",
     "onc",
 )
 
+def is_allowed(token: str) -> bool:
+    token = token.lower()
+    return token.startswith(allowed_prefixes)
+
+text = makefile.read_text(errors="ignore")
+lines = text.splitlines()
+
 dtb_token_re = re.compile(r'(?<![\w.-])([A-Za-z0-9_.+-]+\.dtbo?)(?![\w.-])')
+base_line_re = re.compile(r'^\s*([A-Za-z0-9_.+-]+\.dtbo?)-base\s*:=')
 
 kept = []
 removed = []
-
-def filter_dtb_token(match):
-    token = match.group(1)
-    base = token.lower()
-
-    if base.startswith(allowed_prefixes):
-        kept.append(token)
-        return token
-
-    removed.append(token)
-    return ""
-
 new_lines = []
 
-for line in text.splitlines():
-    original = line
+for raw_line in lines:
+    line = raw_line
+    lower = line.lower()
 
-    if ".dtb" in line or ".dtbo" in line:
-        line = dtb_token_re.sub(filter_dtb_token, line)
+    if ".dtb" in lower or ".dtbo" in lower:
+        base_match = base_line_re.match(line)
 
-        # Bersihkan whitespace berlebihan
+        # Hapus line seperti:
+        # msm8953-cdp-overlay.dtbo-base := ...
+        if base_match:
+            base_target = base_match.group(1)
+            if not is_allowed(base_target):
+                removed.append(base_target + "-base")
+                continue
+
+        def replace_token(match):
+            token = match.group(1)
+
+            if is_allowed(token):
+                kept.append(token)
+                return token
+
+            removed.append(token)
+            return ""
+
+        line = dtb_token_re.sub(replace_token, line)
         line = re.sub(r'[ \t]+', ' ', line).rstrip()
 
         stripped = line.strip()
 
-        # Buang line dtb kosong
+        # Buang line kosong / line continuation kosong
         if stripped in ["", "\\"]:
             continue
 
-        if re.match(r'^dtb-[^=]+\+=\s*\\?$', stripped):
-            continue
-
-        if re.match(r'^dtbo-[^=]+\+=\s*\\?$', stripped):
+        # Buang assignment dtb/dtbo yang sudah kosong
+        if re.match(r'^(dtb|dtbo)-[^=]+\+=\s*\\?$', stripped):
             continue
 
     new_lines.append(line)
@@ -132,58 +141,59 @@ makefile.write_text(text)
 
 print(f"Patched Makefile: {makefile}")
 
-kept_unique = sorted(set(kept))
-removed_unique = sorted(set(removed))
-
 print("")
 print("==> Kept DTB/DTBO:")
-for item in kept_unique:
+for item in sorted(set(kept)):
     print(f"KEEP: {item}")
 
 print("")
-print("==> Removed non-onclite DTB/DTBO count:", len(removed_unique))
-for item in removed_unique[:80]:
+print("==> Removed DTB/DTBO / base entries:")
+for item in sorted(set(removed))[:120]:
     print(f"REMOVE: {item}")
 
-if len(removed_unique) > 80:
-    print(f"... and {len(removed_unique) - 80} more removed")
+if len(set(removed)) > 120:
+    print(f"... and {len(set(removed)) - 120} more removed")
 
-if not kept_unique:
-    print("ERROR: Tidak ada DTB SDM632/onclite/onc yang tersisa.")
-    print("Isi Makefile backup masih ada di Makefile.bak")
+# Validasi ketat: tidak boleh ada .dtb/.dtbo non-target tersisa, termasuk .dtbo-base
+validation_lines = [
+    l for l in text.splitlines()
+    if not l.strip().startswith("#")
+]
+validation_text = "\n".join(validation_lines)
+
+all_targets = re.findall(
+    r'(?<![\w.-])([A-Za-z0-9_.+-]+\.dtbo?)(?:-base)?(?![\w.-])',
+    validation_text,
+    flags=re.I
+)
+
+bad_targets = sorted(set(t for t in all_targets if not is_allowed(t)))
+
+if bad_targets:
+    print("")
+    print("ERROR: masih ada DTB/DTBO non-target:")
+    for t in bad_targets:
+        print("  " + t)
     sys.exit(1)
 
-# Validasi: jangan sampai DTB bermasalah masih tersisa
-bad_patterns = [
-    "apq8053",
-    "msm8953",
-    "sdm450",
-    "sda450",
-    "pmi8937",
-    "pmi8940",
-    "lite-dragon",
-]
+good_targets = sorted(set(t for t in all_targets if is_allowed(t)))
 
-lower_text = text.lower()
-
-for bad in bad_patterns:
-    bad_dtb = re.findall(r'[A-Za-z0-9_.+-]*' + re.escape(bad) + r'[A-Za-z0-9_.+-]*\.dtbo?', lower_text)
-    if bad_dtb:
-        print(f"ERROR: masih ada DTB non-target/rusak mengandung {bad}:")
-        for x in sorted(set(bad_dtb)):
-            print("  " + x)
-        sys.exit(1)
+if not good_targets:
+    print("")
+    print("ERROR: tidak ada DTB/DTBO target SDM632/onclite/onc tersisa.")
+    print("Backup Makefile ada di Makefile.bak")
+    sys.exit(1)
 
 print("")
-print("OK: Makefile sekarang hanya build DTB target SDM632/onclite/onc.")
+print("OK: Makefile sekarang hanya menyisakan DTB/DTBO target SDM632/onclite/onc.")
 PY
 
 echo ""
-echo "==> Verify remaining DTB entries in Makefile"
+echo "==> Verify remaining DTB/DTBO entries"
 grep -nE "\.dtb|\.dtbo" "${QCOM_MAKEFILE}" || true
 
 echo ""
-echo "==> Available SDM632 DTS files:"
+echo "==> Available SDM632/onclite DTS files:"
 find "${QCOM_DTS_DIR}" -maxdepth 1 -type f \( \
   -iname "sdm632*.dts" -o \
   -iname "sdm632*.dtsi" -o \
