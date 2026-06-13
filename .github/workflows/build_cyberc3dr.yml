@@ -1,0 +1,272 @@
+name: Build cyberc3dr onclite KernelSU test
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Kernel source repo"
+        required: true
+        default: "https://github.com/cyberc3dr/android_kernel_xiaomi_onclite.git"
+      source_branch:
+        description: "Kernel source branch"
+        required: false
+        default: "lineage-21-test"
+      defconfig:
+        description: "Defconfig name"
+        required: true
+        default: "onclite_defconfig"
+
+concurrency:
+  group: build-cyberc3dr-onclite-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    env:
+      CCACHE_DIR: /home/runner/.ccache
+      CCACHE_BASEDIR: /home/runner/work/onclite-kernel/onclite-kernel
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_COMPILERCHECK: content
+      USE_CCACHE: "1"
+
+    steps:
+      - name: Checkout build kit
+        uses: actions/checkout@v4
+
+      - name: Fix scripts permission
+        run: |
+          echo "Current directory:"
+          pwd
+
+          echo "Root files:"
+          ls -la
+
+          if [ -d scripts ]; then
+            find scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
+            chmod +x scripts/*.sh
+            ls -la scripts
+          else
+            echo "ERROR: folder scripts tidak ada"
+            exit 1
+          fi
+
+          if [ ! -f original_boot.img ]; then
+            echo "ERROR: original_boot.img tidak ada di root repo."
+            echo "Upload boot CrDroid asli kamu sebagai original_boot.img."
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y \
+            git \
+            curl \
+            wget \
+            build-essential \
+            bc \
+            bison \
+            flex \
+            libssl-dev \
+            libelf-dev \
+            zip \
+            unzip \
+            python3 \
+            python-is-python3 \
+            clang \
+            lld \
+            llvm \
+            gcc-aarch64-linux-gnu \
+            gcc-arm-linux-gnueabi \
+            cpio \
+            rsync \
+            perl \
+            make \
+            ccache
+
+      - name: Restore ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-cyberc3dr-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            ccache-cyberc3dr-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-
+            ccache-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-
+            ccache-onclite-${{ runner.os }}-
+
+      - name: Setup ccache
+        run: |
+          mkdir -p "$CCACHE_DIR"
+          ccache -M 4G
+          ccache -z
+          ccache -s | tee ccache_stats_before.txt
+
+      - name: Fetch cyberc3dr kernel source with submodules
+        env:
+          SOURCE_REPO: ${{ github.event.inputs.source_repo }}
+          SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
+        run: |
+          set -euo pipefail
+
+          echo "==> Fetch cyberc3dr kernel source"
+          echo "Source repo   : ${SOURCE_REPO}"
+          echo "Source branch : ${SOURCE_BRANCH}"
+
+          rm -rf kernel kernel_source source android_kernel_xiaomi_onc android_kernel_xiaomi_onclite
+
+          if [ -n "${SOURCE_BRANCH}" ]; then
+            git clone --depth=1 --recurse-submodules --shallow-submodules \
+              -b "${SOURCE_BRANCH}" \
+              "${SOURCE_REPO}" kernel
+          else
+            git clone --depth=1 --recurse-submodules --shallow-submodules \
+              "${SOURCE_REPO}" kernel
+          fi
+
+          cd kernel
+
+          echo "==> Git info"
+          git log --oneline -5 || true
+
+          echo "==> Submodule status"
+          git submodule status || true
+
+          echo "==> Defconfig candidates"
+          find arch/arm64/configs -maxdepth 1 -type f \( \
+            -iname "*onclite*defconfig" -o \
+            -iname "*onc*defconfig" -o \
+            -iname "*msm8953*defconfig" -o \
+            -iname "*sdm632*defconfig" \
+          \) | sort || true
+
+          echo "==> KernelSU check"
+          find . -maxdepth 3 -iname "*kernelsu*" -o -path "./KernelSU/*" | head -n 80 || true
+
+      - name: Prepare defconfig
+        env:
+          DEFCONFIG: ${{ github.event.inputs.defconfig }}
+        run: |
+          bash scripts/02_prepare_defconfig.sh
+
+      - name: Enable built-in KernelSU config only
+        env:
+          DEFCONFIG: ${{ github.event.inputs.defconfig }}
+        run: |
+          set -euo pipefail
+
+          KERNEL_DIR="kernel"
+          DEFCONFIG_PATH="${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG}"
+
+          if [ ! -f "${DEFCONFIG_PATH}" ]; then
+            echo "ERROR: ${DEFCONFIG_PATH} tidak ditemukan"
+            echo "Daftar defconfig:"
+            ls -la "${KERNEL_DIR}/arch/arm64/configs" | head -n 100
+            exit 1
+          fi
+
+          set_config() {
+            local key="$1"
+            local val="$2"
+
+            sed -i "/^${key}=/d" "${DEFCONFIG_PATH}"
+            sed -i "/^# ${key} is not set/d" "${DEFCONFIG_PATH}"
+
+            if [ "${val}" = "n" ]; then
+              echo "# ${key} is not set" >> "${DEFCONFIG_PATH}"
+            else
+              echo "${key}=${val}" >> "${DEFCONFIG_PATH}"
+            fi
+          }
+
+          echo "==> Enable KernelSU from cyberc3dr source"
+          set_config CONFIG_KSU y
+          set_config CONFIG_KPROBES y
+          set_config CONFIG_KALLSYMS y
+          set_config CONFIG_KALLSYMS_ALL y
+          set_config CONFIG_OVERLAY_FS y
+          set_config CONFIG_MODULES y
+          set_config CONFIG_MODULE_UNLOAD y
+          set_config CONFIG_SECURITY_SELINUX y
+
+          echo "==> Disable ReSukiSU-specific/manual flags if present"
+          set_config CONFIG_KSU_MANUAL_HOOK n
+          set_config CONFIG_KSU_SUSFS n
+
+          echo "==> Final defconfig KSU flags"
+          grep -E "CONFIG_KSU|CONFIG_KPROBES|CONFIG_KALLSYMS|CONFIG_OVERLAY_FS|CONFIG_MODULES|CONFIG_SECURITY_SELINUX" "${DEFCONFIG_PATH}" || true
+
+      - name: Build kernel using original DTB tail
+        env:
+          DEFCONFIG: ${{ github.event.inputs.defconfig }}
+          USE_CCACHE: "1"
+        run: |
+          set +e
+          set -o pipefail
+
+          bash scripts/05_build_kernel.sh 2>&1 \
+            | sed -u \
+              -e '/aarch64-linux-gnu-objdump: Warning: Unrecognized form/d' \
+              -e '/aarch64-linux-gnu-objdump: Warning: Bogus end-of-siblings/d' \
+              -e '/aarch64-linux-gnu-objdump: Warning: Further warnings about bogus/d' \
+              -e '/aarch64-linux-gnu-objdump: Warning: DIE at offset/d' \
+              -e '/Unrecognized form: 0x22/d' \
+              -e '/Unrecognized form: 0x23/d' \
+              -e '/Bogus end-of-siblings marker/d' \
+            | tee build_kernel.log
+
+          BUILD_STATUS=${PIPESTATUS[0]}
+
+          echo ""
+          echo "==> Ccache status after build"
+          ccache -s | tee ccache_stats.txt || true
+
+          echo ""
+          echo "Build status: ${BUILD_STATUS}"
+          exit "${BUILD_STATUS}"
+
+      - name: Pack AnyKernel3
+        if: success()
+        run: |
+          bash scripts/06_pack_anykernel.sh
+
+      - name: Repack raw boot.img
+        if: success()
+        run: |
+          bash scripts/07_repack_boot_img.sh
+
+      - name: Rename output
+        if: success()
+        run: |
+          mkdir -p dist
+
+          if [ -f dist/ReSukiSU-onclite-4.9-boot.img ]; then
+            cp dist/ReSukiSU-onclite-4.9-boot.img dist/cyberc3dr-KernelSU-onclite-boot.img
+          fi
+
+          if [ -f dist/ReSukiSU-onclite-4.9-AnyKernel3.zip ]; then
+            cp dist/ReSukiSU-onclite-4.9-AnyKernel3.zip dist/cyberc3dr-KernelSU-onclite-AnyKernel3.zip
+          fi
+
+          ls -lh dist
+
+      - name: Save ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /home/runner/.ccache
+          key: ccache-cyberc3dr-onclite-${{ runner.os }}-${{ github.event.inputs.defconfig }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cyberc3dr-KernelSU-onclite-build
+          path: |
+            dist/*
+            out/.config
+            build_kernel.log
+            ccache_stats.txt
+            ccache_stats_before.txt
