@@ -24,18 +24,12 @@ fi
 
 if [ -z "${KERNEL_DIR}" ] || [ ! -d "${KERNEL_DIR}" ]; then
   echo "ERROR: Kernel source folder tidak ditemukan."
+  echo "Isi root repo:"
   ls -la
   exit 1
 fi
 
 echo "Kernel dir: ${KERNEL_DIR}"
-
-cd "${KERNEL_DIR}"
-
-export ARCH=arm64
-export SUBARCH=arm64
-export KBUILD_BUILD_USER=resukisu
-export KBUILD_BUILD_HOST=github-actions
 
 OUT_DIR="${ROOT_DIR}/out"
 DIST_DIR="${ROOT_DIR}/dist"
@@ -43,34 +37,91 @@ DIST_DIR="${ROOT_DIR}/dist"
 mkdir -p "${OUT_DIR}"
 mkdir -p "${DIST_DIR}"
 
+echo "==> Force disable broken DTBs before build"
+
+cd "${ROOT_DIR}"
+
+if [ -f "scripts/03_disable_broken_dtbs.sh" ]; then
+  sed -i 's/\r$//' scripts/03_disable_broken_dtbs.sh
+  chmod +x scripts/03_disable_broken_dtbs.sh
+  bash scripts/03_disable_broken_dtbs.sh
+else
+  echo "WARNING: scripts/03_disable_broken_dtbs.sh tidak ada, skip disable broken DTBs."
+fi
+
+cd "${ROOT_DIR}/${KERNEL_DIR}"
+
+export ARCH=arm64
+export SUBARCH=arm64
+export KBUILD_BUILD_USER=resukisu
+export KBUILD_BUILD_HOST=github-actions
+
 echo "==> Check defconfig"
 
 if [ ! -f "arch/arm64/configs/${DEFCONFIG}" ]; then
   echo "WARNING: ${DEFCONFIG} tidak ditemukan."
   echo "Mencari defconfig alternatif..."
 
-  ALT_DEFCONFIG="$(find arch/arm64/configs -maxdepth 1 -type f \( -iname "*onclite*defconfig" -o -iname "*onc*defconfig" -o -iname "*msm8953*defconfig" \) | head -n 1 || true)"
+  ALT_DEFCONFIG="$(find arch/arm64/configs -maxdepth 1 -type f \( \
+    -iname "*onclite*defconfig" -o \
+    -iname "*onc*defconfig" -o \
+    -iname "*msm8953*defconfig" -o \
+    -iname "*sdm632*defconfig" \
+  \) | head -n 1 || true)"
 
   if [ -n "${ALT_DEFCONFIG}" ]; then
     DEFCONFIG="$(basename "${ALT_DEFCONFIG}")"
     echo "Pakai defconfig alternatif: ${DEFCONFIG}"
   else
     echo "ERROR: Tidak menemukan defconfig cocok."
+    echo "Daftar defconfig:"
     ls -la arch/arm64/configs | head -n 100
     exit 1
   fi
 fi
 
 echo "==> Make defconfig"
+
 make O="${OUT_DIR}" "${DEFCONFIG}"
 
 echo "==> Final config check"
-grep -E "CONFIG_KSU|CONFIG_KALLSYMS|CONFIG_KPROBES|CONFIG_OVERLAY_FS" "${OUT_DIR}/.config" || true
+
+if [ -f "${OUT_DIR}/.config" ]; then
+  grep -E "CONFIG_KSU|CONFIG_KALLSYMS|CONFIG_KPROBES|CONFIG_OVERLAY_FS|CONFIG_MODULES|CONFIG_SECURITY_SELINUX" "${OUT_DIR}/.config" || true
+else
+  echo "ERROR: ${OUT_DIR}/.config tidak ditemukan setelah make defconfig."
+  exit 1
+fi
+
+echo "==> Setup compiler"
+
+if [ "${USE_CCACHE:-0}" = "1" ] && command -v ccache >/dev/null 2>&1; then
+  CC_CMD="ccache clang"
+  echo "Using ccache."
+else
+  CC_CMD="clang"
+  echo "Using clang without ccache."
+fi
+
+JOBS="$(nproc)"
+
+echo "Compiler: ${CC_CMD}"
+echo "Jobs    : ${JOBS}"
+
+if command -v clang >/dev/null 2>&1; then
+  echo "Clang version:"
+  clang --version | head -n 3 || true
+fi
+
+if command -v ccache >/dev/null 2>&1; then
+  echo "Ccache status before build:"
+  ccache -s || true
+fi
 
 echo "==> Start kernel build"
 
-make -j"$(nproc)" O="${OUT_DIR}" \
-  CC=clang \
+make -j"${JOBS}" O="${OUT_DIR}" \
+  CC="${CC_CMD}" \
   CLANG_TRIPLE=aarch64-linux-gnu- \
   CROSS_COMPILE=aarch64-linux-gnu- \
   CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
@@ -92,6 +143,7 @@ done
 
 if [ -z "${IMAGE_PATH}" ]; then
   echo "ERROR: Kernel image tidak ditemukan."
+  echo "Isi folder boot:"
   find "${OUT_DIR}/arch/arm64/boot" -maxdepth 3 -type f | sort || true
   exit 1
 fi
@@ -100,6 +152,11 @@ echo "Kernel image: ${IMAGE_PATH}"
 
 cp "${IMAGE_PATH}" "${DIST_DIR}/Image.gz-dtb"
 cp "${OUT_DIR}/.config" "${DIST_DIR}/kernel_config_built.txt"
+
+if command -v ccache >/dev/null 2>&1; then
+  echo "Ccache status after build:"
+  ccache -s || true
+fi
 
 echo "==> Build selesai"
 ls -lh "${DIST_DIR}"
