@@ -25,6 +25,7 @@ Important limitation: this kit cannot magically compile from `boot.img` alone. Y
 
 Before flashing, make sure you have backed up your `boot.img` in recovery such as Orange Fox or TWRP.
 
+**HOW TO FLASH:**
 ```bash
 fastboot flash boot boot.img
 ```
