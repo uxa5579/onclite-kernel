@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Disable broken/non-onclite DTBs"
+echo "==> Keep only onclite/SDM632 DTBs"
 
 ROOT_DIR="$(pwd)"
 KERNEL_DIR=""
@@ -35,8 +35,8 @@ echo "QCOM DTS dir  : ${QCOM_DTS_DIR}"
 echo "QCOM Makefile : ${QCOM_MAKEFILE}"
 
 if [ ! -f "${QCOM_MAKEFILE}" ]; then
-  echo "WARNING: ${QCOM_MAKEFILE} tidak ada, skip."
-  exit 0
+  echo "ERROR: ${QCOM_MAKEFILE} tidak ditemukan."
+  exit 1
 fi
 
 cp "${QCOM_MAKEFILE}" "${QCOM_MAKEFILE}.bak"
@@ -73,80 +73,125 @@ if makefile is None:
 
 text = makefile.read_text(errors="ignore")
 
-broken_patterns = [
-    "apq8053-lite-dragon",
+# Untuk Redmi 7/onclite, target aman adalah SDM632/onclite/onc.
+# Semua DTB board lain seperti msm8953, apq8053, sdm450, sda450 akan dibuang dari build list.
+allowed_prefixes = (
+    "sdm632",
+    "onclite",
+    "onc",
+)
 
-    # Error lama
-    "msm8953-pmi8940",
-    "apq8053-pmi8940",
+dtb_token_re = re.compile(r'(?<![\w.-])([A-Za-z0-9_.+-]+\.dtbo?)(?![\w.-])')
 
-    # Error terbaru dari log kamu
-    "msm8953-pmi8937",
-    "apq8053-pmi8937",
-]
+kept = []
+removed = []
 
-print(f"Patch Makefile: {makefile}")
+def filter_dtb_token(match):
+    token = match.group(1)
+    base = token.lower()
 
-lines = text.splitlines(keepends=True)
+    if base.startswith(allowed_prefixes):
+        kept.append(token)
+        return token
+
+    removed.append(token)
+    return ""
+
 new_lines = []
 
-for line in lines:
+for line in text.splitlines():
     original = line
 
-    # Hapus token .dtb yang match pattern rusak
-    for name in broken_patterns:
-        line = re.sub(r'(?<![\w.-])' + re.escape(name) + r'[\w.-]*\.dtb', '', line)
+    if ".dtb" in line or ".dtbo" in line:
+        line = dtb_token_re.sub(filter_dtb_token, line)
 
-    # Bersihkan spasi berlebihan
-    line = re.sub(r'[ \t]+', ' ', line)
+        # Bersihkan whitespace berlebihan
+        line = re.sub(r'[ \t]+', ' ', line).rstrip()
 
-    # Kalau line dtb jadi kosong, buang line-nya
-    stripped = line.strip()
+        stripped = line.strip()
 
-    if stripped in ["\\", ""]:
-        continue
+        # Buang line dtb kosong
+        if stripped in ["", "\\"]:
+            continue
 
-    if re.match(r'^dtb-[^=]+\+=\s*\\?$', stripped):
-        continue
+        if re.match(r'^dtb-[^=]+\+=\s*\\?$', stripped):
+            continue
 
-    if re.match(r'^dtb-[^=]+\+=\s*$', stripped):
-        continue
+        if re.match(r'^dtbo-[^=]+\+=\s*\\?$', stripped):
+            continue
 
     new_lines.append(line)
 
-text = "".join(new_lines)
+text = "\n".join(new_lines) + "\n"
 
-# Bersihkan backslash kosong / blank line berlebihan
+# Bersihkan backslash kosong dan blank line berlebihan
 text = re.sub(r'\n\s*\\\s*\n', '\n', text)
 text = re.sub(r'\n{3,}', '\n\n', text)
 
 makefile.write_text(text)
 
-for name in broken_patterns:
-    if re.search(re.escape(name) + r'[\w.-]*\.dtb', text):
-        print(f"ERROR: masih ada broken DTB: {name}")
+print(f"Patched Makefile: {makefile}")
+
+kept_unique = sorted(set(kept))
+removed_unique = sorted(set(removed))
+
+print("")
+print("==> Kept DTB/DTBO:")
+for item in kept_unique:
+    print(f"KEEP: {item}")
+
+print("")
+print("==> Removed non-onclite DTB/DTBO count:", len(removed_unique))
+for item in removed_unique[:80]:
+    print(f"REMOVE: {item}")
+
+if len(removed_unique) > 80:
+    print(f"... and {len(removed_unique) - 80} more removed")
+
+if not kept_unique:
+    print("ERROR: Tidak ada DTB SDM632/onclite/onc yang tersisa.")
+    print("Isi Makefile backup masih ada di Makefile.bak")
+    sys.exit(1)
+
+# Validasi: jangan sampai DTB bermasalah masih tersisa
+bad_patterns = [
+    "apq8053",
+    "msm8953",
+    "sdm450",
+    "sda450",
+    "pmi8937",
+    "pmi8940",
+    "lite-dragon",
+]
+
+lower_text = text.lower()
+
+for bad in bad_patterns:
+    bad_dtb = re.findall(r'[A-Za-z0-9_.+-]*' + re.escape(bad) + r'[A-Za-z0-9_.+-]*\.dtbo?', lower_text)
+    if bad_dtb:
+        print(f"ERROR: masih ada DTB non-target/rusak mengandung {bad}:")
+        for x in sorted(set(bad_dtb)):
+            print("  " + x)
         sys.exit(1)
-    else:
-        print(f"OK: {name} sudah tidak ada")
+
+print("")
+print("OK: Makefile sekarang hanya build DTB target SDM632/onclite/onc.")
 PY
 
-echo "==> Verify broken DTBs removed"
+echo ""
+echo "==> Verify remaining DTB entries in Makefile"
+grep -nE "\.dtb|\.dtbo" "${QCOM_MAKEFILE}" || true
 
-grep -nE "apq8053-lite-dragon|msm8953-pmi8940|apq8053-pmi8940|msm8953-pmi8937|apq8053-pmi8937" "${QCOM_MAKEFILE}" && {
-  echo "ERROR: broken DTB masih ada di Makefile"
-  exit 1
-} || {
-  echo "OK: broken DTB sudah bersih"
-}
-
-echo "==> Remaining onclite/onc/sdm632 candidates:"
+echo ""
+echo "==> Available SDM632 DTS files:"
 find "${QCOM_DTS_DIR}" -maxdepth 1 -type f \( \
+  -iname "sdm632*.dts" -o \
+  -iname "sdm632*.dtsi" -o \
   -iname "*onclite*.dts" -o \
   -iname "*onclite*.dtsi" -o \
-  -iname "*sdm632*.dts" -o \
-  -iname "*sdm632*.dtsi" -o \
-  -iname "*onc*.dts" -o \
-  -iname "*onc*.dtsi" \
+  -iname "onc*.dts" -o \
+  -iname "onc*.dtsi" \
 \) | sort || true
 
-echo "==> Broken DTB disable selesai"
+echo ""
+echo "==> DTB filter selesai"
