@@ -66,6 +66,8 @@ jobs:
 
       - name: Install dependencies
         run: |
+          set -euo pipefail
+
           sudo apt update
           sudo apt install -y \
             git \
@@ -198,7 +200,7 @@ jobs:
             bash scripts/02_prepare_defconfig.sh
           } 2>&1 | tee prepare_defconfig.log
 
-      - name: Enable built-in KernelSU config only
+      - name: Disable vpnhide and enable KernelSU config only
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig }}
         run: |
@@ -218,9 +220,58 @@ jobs:
               exit 1
             fi
 
+            echo "==> Normalize defconfig newline"
+            python3 - <<PY
+from pathlib import Path
+
+p = Path("${DEFCONFIG_PATH}")
+data = p.read_bytes()
+
+if data and not data.endswith(b"\\n"):
+    p.write_bytes(data + b"\\n")
+    print("Added missing final newline:", p)
+else:
+    print("Final newline OK:", p)
+PY
+
+            echo ""
+            echo "==> Remove broken vpnhide Kconfig reference"
+
+            if grep -q 'drivers/vpnhide/Kconfig' "${KERNEL_DIR}/drivers/Kconfig"; then
+              sed -i '/drivers\/vpnhide\/Kconfig/d' "${KERNEL_DIR}/drivers/Kconfig"
+              echo "Removed drivers/vpnhide/Kconfig from drivers/Kconfig"
+            else
+              echo "No drivers/vpnhide/Kconfig reference found"
+            fi
+
+            if [ -f "${KERNEL_DIR}/drivers/Makefile" ]; then
+              sed -i '/vpnhide/d' "${KERNEL_DIR}/drivers/Makefile"
+              echo "Removed vpnhide from drivers/Makefile if present"
+            fi
+
+            echo ""
+            echo "==> Remove all old KSU/VPNHIDE related flags from defconfig"
+
+            sed -i '/^CONFIG_VPNHIDE=/d' "${DEFCONFIG_PATH}"
+            sed -i '/^# CONFIG_VPNHIDE is not set/d' "${DEFCONFIG_PATH}"
+
+            sed -i '/^CONFIG_KSU=/d' "${DEFCONFIG_PATH}"
+            sed -i '/^CONFIG_KSU_/d' "${DEFCONFIG_PATH}"
+            sed -i '/^# CONFIG_KSU is not set/d' "${DEFCONFIG_PATH}"
+            sed -i '/^# CONFIG_KSU_/d' "${DEFCONFIG_PATH}"
+
             set_config() {
               local key="$1"
               local val="$2"
+
+              python3 - <<PY
+from pathlib import Path
+
+p = Path("${DEFCONFIG_PATH}")
+data = p.read_bytes()
+if data and not data.endswith(b"\\n"):
+    p.write_bytes(data + b"\\n")
+PY
 
               sed -i "/^${key}=/d" "${DEFCONFIG_PATH}"
               sed -i "/^# ${key} is not set/d" "${DEFCONFIG_PATH}"
@@ -232,6 +283,11 @@ jobs:
               fi
             }
 
+            echo ""
+            echo "==> Disable vpnhide"
+            set_config CONFIG_VPNHIDE n
+
+            echo ""
             echo "==> Enable KernelSU from cyberc3dr source"
             set_config CONFIG_KSU y
             set_config CONFIG_KPROBES y
@@ -243,13 +299,21 @@ jobs:
             set_config CONFIG_SECURITY_SELINUX y
 
             echo ""
-            echo "==> Disable ReSukiSU-specific/manual flags if present"
+            echo "==> Disable ReSukiSU-specific/manual flags"
             set_config CONFIG_KSU_MANUAL_HOOK n
             set_config CONFIG_KSU_SUSFS n
 
             echo ""
-            echo "==> Final defconfig KSU flags"
-            grep -E "CONFIG_KSU|CONFIG_KPROBES|CONFIG_KALLSYMS|CONFIG_OVERLAY_FS|CONFIG_MODULES|CONFIG_SECURITY_SELINUX" "${DEFCONFIG_PATH}" || true
+            echo "==> Final defconfig flags"
+            grep -E "CONFIG_VPNHIDE|CONFIG_KSU|CONFIG_KPROBES|CONFIG_KALLSYMS|CONFIG_OVERLAY_FS|CONFIG_MODULES|CONFIG_SECURITY_SELINUX" "${DEFCONFIG_PATH}" || true
+
+            echo ""
+            echo "==> Check drivers/Kconfig vpnhide"
+            grep -n "vpnhide" "${KERNEL_DIR}/drivers/Kconfig" || true
+
+            echo ""
+            echo "==> Check drivers/Makefile vpnhide"
+            grep -n "vpnhide" "${KERNEL_DIR}/drivers/Makefile" || true
 
           } 2>&1 | tee enable_kernelsu_config.log
 
@@ -320,42 +384,42 @@ jobs:
           fi
 
           python3 - <<'PY'
-          import struct
-          from pathlib import Path
+import struct
+from pathlib import Path
 
-          boot_in = Path("dist/ReSukiSU-onclite-4.9-boot.img")
-          boot_out = Path("dist/cyberc3dr-KernelSU-onclite-boot-fixed.img")
+boot_in = Path("dist/ReSukiSU-onclite-4.9-boot.img")
+boot_out = Path("dist/cyberc3dr-KernelSU-onclite-boot-fixed.img")
 
-          data = bytearray(boot_in.read_bytes())
+data = bytearray(boot_in.read_bytes())
 
-          if data[:8] != b"ANDROID!":
-              raise SystemExit("ERROR: bukan Android boot image")
+if data[:8] != b"ANDROID!":
+    raise SystemExit("ERROR: bukan Android boot image")
 
-          def get_u32(off):
-              return struct.unpack_from("<I", data, off)[0]
+def get_u32(off):
+    return struct.unpack_from("<I", data, off)[0]
 
-          def put_u64(off, val):
-              struct.pack_into("<Q", data, off, val)
+def put_u64(off, val):
+    struct.pack_into("<Q", data, off, val)
 
-          header_version = get_u32(40)
+header_version = get_u32(40)
 
-          # Android boot image v1:
-          # recovery_dtbo_size   offset 1632, u32
-          # recovery_dtbo_offset offset 1636, u64
-          if header_version >= 1 and len(data) >= 1648:
-              recovery_dtbo_size = get_u32(1632)
+# Android boot image v1:
+# recovery_dtbo_size   offset 1632, u32
+# recovery_dtbo_offset offset 1636, u64
+if header_version >= 1 and len(data) >= 1648:
+    recovery_dtbo_size = get_u32(1632)
 
-              if recovery_dtbo_size == 0:
-                  print("recovery_dtbo_size=0, set recovery_dtbo_offset=0")
-                  put_u64(1636, 0)
-              else:
-                  print("recovery_dtbo_size bukan 0, offset tidak diubah:", recovery_dtbo_size)
-          else:
-              print("header_version < 1 atau header terlalu kecil, tidak perlu fix recovery_dtbo_offset")
+    if recovery_dtbo_size == 0:
+        print("recovery_dtbo_size=0, set recovery_dtbo_offset=0")
+        put_u64(1636, 0)
+    else:
+        print("recovery_dtbo_size bukan 0, offset tidak diubah:", recovery_dtbo_size)
+else:
+    print("header_version < 1 atau header terlalu kecil, tidak perlu fix recovery_dtbo_offset")
 
-          boot_out.write_bytes(data)
-          print("Wrote:", boot_out)
-          PY
+boot_out.write_bytes(data)
+print("Wrote:", boot_out)
+PY
 
           if [ -f dist/ReSukiSU-onclite-4.9-AnyKernel3.zip ]; then
             cp dist/ReSukiSU-onclite-4.9-AnyKernel3.zip dist/cyberc3dr-KernelSU-onclite-AnyKernel3.zip
