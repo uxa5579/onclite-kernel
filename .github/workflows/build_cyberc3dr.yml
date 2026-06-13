@@ -38,15 +38,20 @@ jobs:
 
       - name: Fix scripts permission
         run: |
-          echo "Current directory:"
+          set -euo pipefail
+
+          echo "==> Current directory"
           pwd
 
-          echo "Root files:"
+          echo ""
+          echo "==> Root files"
           ls -la
 
           if [ -d scripts ]; then
             find scripts -type f -name "*.sh" -exec sed -i 's/\r$//' {} \;
             chmod +x scripts/*.sh
+            echo ""
+            echo "==> Scripts"
             ls -la scripts
           else
             echo "ERROR: folder scripts tidak ada"
@@ -99,104 +104,154 @@ jobs:
 
       - name: Setup ccache
         run: |
+          set -euo pipefail
+
           mkdir -p "$CCACHE_DIR"
           ccache -M 4G
           ccache -z
           ccache -s | tee ccache_stats_before.txt
 
-      - name: Fetch cyberc3dr kernel source with submodules
+      - name: Fetch cyberc3dr kernel source with KernelSU only
         env:
           SOURCE_REPO: ${{ github.event.inputs.source_repo }}
           SOURCE_BRANCH: ${{ github.event.inputs.source_branch }}
         run: |
-          set -euo pipefail
+          set -o pipefail
 
-          echo "==> Fetch cyberc3dr kernel source"
-          echo "Source repo   : ${SOURCE_REPO}"
-          echo "Source branch : ${SOURCE_BRANCH}"
+          {
+            set -euo pipefail
 
-          rm -rf kernel kernel_source source android_kernel_xiaomi_onc android_kernel_xiaomi_onclite
+            echo "==> Fetch cyberc3dr kernel source"
+            echo "Source repo   : ${SOURCE_REPO}"
+            echo "Source branch : ${SOURCE_BRANCH}"
 
-          if [ -n "${SOURCE_BRANCH}" ]; then
-            git clone --depth=1 --recurse-submodules --shallow-submodules \
-              -b "${SOURCE_BRANCH}" \
-              "${SOURCE_REPO}" kernel
-          else
-            git clone --depth=1 --recurse-submodules --shallow-submodules \
-              "${SOURCE_REPO}" kernel
-          fi
+            rm -rf kernel kernel_source source android_kernel_xiaomi_onc android_kernel_xiaomi_onclite
 
-          cd kernel
+            if [ -n "${SOURCE_BRANCH}" ]; then
+              git clone \
+                -b "${SOURCE_BRANCH}" \
+                "${SOURCE_REPO}" kernel
+            else
+              git clone "${SOURCE_REPO}" kernel
+            fi
 
-          echo "==> Git info"
-          git log --oneline -5 || true
+            cd kernel
 
-          echo "==> Submodule status"
-          git submodule status || true
+            echo ""
+            echo "==> Git info"
+            git log --oneline -5 || true
 
-          echo "==> Defconfig candidates"
-          find arch/arm64/configs -maxdepth 1 -type f \( \
-            -iname "*onclite*defconfig" -o \
-            -iname "*onc*defconfig" -o \
-            -iname "*msm8953*defconfig" -o \
-            -iname "*sdm632*defconfig" \
-          \) | sort || true
+            echo ""
+            echo "==> Show .gitmodules"
+            cat .gitmodules || true
 
-          echo "==> KernelSU check"
-          find . -maxdepth 3 -iname "*kernelsu*" -o -path "./KernelSU/*" | head -n 80 || true
+            echo ""
+            echo "==> Init KernelSU submodule only"
+            git submodule sync KernelSU || true
+
+            if git submodule update --init KernelSU; then
+              echo "KernelSU submodule OK"
+            else
+              echo "WARNING: KernelSU submodule gagal, fallback clone KernelSU manual"
+
+              rm -rf KernelSU
+
+              git clone https://github.com/skye-tachyon/KernelSU.git KernelSU || \
+              git clone https://github.com/tiann/KernelSU.git KernelSU
+            fi
+
+            echo ""
+            echo "==> Skip vpnhide-driver submodule"
+            echo "vpnhide-driver tidak dibutuhkan untuk test boot KernelSU."
+
+            echo ""
+            echo "==> Submodule status"
+            git submodule status || true
+
+            echo ""
+            echo "==> Defconfig candidates"
+            find arch/arm64/configs -maxdepth 1 -type f \( \
+              -iname "*onclite*defconfig" -o \
+              -iname "*onc*defconfig" -o \
+              -iname "*msm8953*defconfig" -o \
+              -iname "*sdm632*defconfig" \
+            \) | sort || true
+
+            echo ""
+            echo "==> KernelSU check"
+            if [ -d KernelSU ]; then
+              find KernelSU -maxdepth 3 -type f | head -n 80 || true
+            else
+              echo "WARNING: folder KernelSU tidak ada"
+            fi
+
+          } 2>&1 | tee fetch_source.log
 
       - name: Prepare defconfig
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig }}
         run: |
-          bash scripts/02_prepare_defconfig.sh
+          set -o pipefail
+
+          {
+            set -euo pipefail
+            bash scripts/02_prepare_defconfig.sh
+          } 2>&1 | tee prepare_defconfig.log
 
       - name: Enable built-in KernelSU config only
         env:
           DEFCONFIG: ${{ github.event.inputs.defconfig }}
         run: |
-          set -euo pipefail
+          set -o pipefail
 
-          KERNEL_DIR="kernel"
-          DEFCONFIG_PATH="${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG}"
+          {
+            set -euo pipefail
 
-          if [ ! -f "${DEFCONFIG_PATH}" ]; then
-            echo "ERROR: ${DEFCONFIG_PATH} tidak ditemukan"
-            echo "Daftar defconfig:"
-            ls -la "${KERNEL_DIR}/arch/arm64/configs" | head -n 100
-            exit 1
-          fi
+            KERNEL_DIR="kernel"
+            DEFCONFIG_PATH="${KERNEL_DIR}/arch/arm64/configs/${DEFCONFIG}"
 
-          set_config() {
-            local key="$1"
-            local val="$2"
-
-            sed -i "/^${key}=/d" "${DEFCONFIG_PATH}"
-            sed -i "/^# ${key} is not set/d" "${DEFCONFIG_PATH}"
-
-            if [ "${val}" = "n" ]; then
-              echo "# ${key} is not set" >> "${DEFCONFIG_PATH}"
-            else
-              echo "${key}=${val}" >> "${DEFCONFIG_PATH}"
+            if [ ! -f "${DEFCONFIG_PATH}" ]; then
+              echo "ERROR: ${DEFCONFIG_PATH} tidak ditemukan"
+              echo ""
+              echo "Daftar defconfig:"
+              ls -la "${KERNEL_DIR}/arch/arm64/configs" | head -n 100
+              exit 1
             fi
-          }
 
-          echo "==> Enable KernelSU from cyberc3dr source"
-          set_config CONFIG_KSU y
-          set_config CONFIG_KPROBES y
-          set_config CONFIG_KALLSYMS y
-          set_config CONFIG_KALLSYMS_ALL y
-          set_config CONFIG_OVERLAY_FS y
-          set_config CONFIG_MODULES y
-          set_config CONFIG_MODULE_UNLOAD y
-          set_config CONFIG_SECURITY_SELINUX y
+            set_config() {
+              local key="$1"
+              local val="$2"
 
-          echo "==> Disable ReSukiSU-specific/manual flags if present"
-          set_config CONFIG_KSU_MANUAL_HOOK n
-          set_config CONFIG_KSU_SUSFS n
+              sed -i "/^${key}=/d" "${DEFCONFIG_PATH}"
+              sed -i "/^# ${key} is not set/d" "${DEFCONFIG_PATH}"
 
-          echo "==> Final defconfig KSU flags"
-          grep -E "CONFIG_KSU|CONFIG_KPROBES|CONFIG_KALLSYMS|CONFIG_OVERLAY_FS|CONFIG_MODULES|CONFIG_SECURITY_SELINUX" "${DEFCONFIG_PATH}" || true
+              if [ "${val}" = "n" ]; then
+                echo "# ${key} is not set" >> "${DEFCONFIG_PATH}"
+              else
+                echo "${key}=${val}" >> "${DEFCONFIG_PATH}"
+              fi
+            }
+
+            echo "==> Enable KernelSU from cyberc3dr source"
+            set_config CONFIG_KSU y
+            set_config CONFIG_KPROBES y
+            set_config CONFIG_KALLSYMS y
+            set_config CONFIG_KALLSYMS_ALL y
+            set_config CONFIG_OVERLAY_FS y
+            set_config CONFIG_MODULES y
+            set_config CONFIG_MODULE_UNLOAD y
+            set_config CONFIG_SECURITY_SELINUX y
+
+            echo ""
+            echo "==> Disable ReSukiSU-specific/manual flags if present"
+            set_config CONFIG_KSU_MANUAL_HOOK n
+            set_config CONFIG_KSU_SUSFS n
+
+            echo ""
+            echo "==> Final defconfig KSU flags"
+            grep -E "CONFIG_KSU|CONFIG_KPROBES|CONFIG_KALLSYMS|CONFIG_OVERLAY_FS|CONFIG_MODULES|CONFIG_SECURITY_SELINUX" "${DEFCONFIG_PATH}" || true
+
+          } 2>&1 | tee enable_kernelsu_config.log
 
       - name: Build kernel using original DTB tail
         env:
@@ -230,26 +285,84 @@ jobs:
       - name: Pack AnyKernel3
         if: success()
         run: |
-          bash scripts/06_pack_anykernel.sh
+          set -o pipefail
+
+          {
+            set -euo pipefail
+            bash scripts/06_pack_anykernel.sh
+          } 2>&1 | tee pack_anykernel.log
 
       - name: Repack raw boot.img
         if: success()
         run: |
-          bash scripts/07_repack_boot_img.sh
+          set -o pipefail
 
-      - name: Rename output
+          {
+            set -euo pipefail
+            bash scripts/07_repack_boot_img.sh
+          } 2>&1 | tee repack_boot.log
+
+      - name: Fix boot header and rename output
         if: success()
         run: |
+          set -euo pipefail
+
           mkdir -p dist
 
-          if [ -f dist/ReSukiSU-onclite-4.9-boot.img ]; then
-            cp dist/ReSukiSU-onclite-4.9-boot.img dist/cyberc3dr-KernelSU-onclite-boot.img
+          BOOT_IN="dist/ReSukiSU-onclite-4.9-boot.img"
+          BOOT_OUT="dist/cyberc3dr-KernelSU-onclite-boot-fixed.img"
+
+          if [ ! -f "${BOOT_IN}" ]; then
+            echo "WARNING: ${BOOT_IN} tidak ditemukan."
+            echo "Isi dist:"
+            ls -lh dist || true
+            exit 0
           fi
+
+          python3 - <<'PY'
+          import struct
+          from pathlib import Path
+
+          boot_in = Path("dist/ReSukiSU-onclite-4.9-boot.img")
+          boot_out = Path("dist/cyberc3dr-KernelSU-onclite-boot-fixed.img")
+
+          data = bytearray(boot_in.read_bytes())
+
+          if data[:8] != b"ANDROID!":
+              raise SystemExit("ERROR: bukan Android boot image")
+
+          def get_u32(off):
+              return struct.unpack_from("<I", data, off)[0]
+
+          def put_u64(off, val):
+              struct.pack_into("<Q", data, off, val)
+
+          header_version = get_u32(40)
+
+          # Android boot image v1:
+          # recovery_dtbo_size   offset 1632, u32
+          # recovery_dtbo_offset offset 1636, u64
+          if header_version >= 1 and len(data) >= 1648:
+              recovery_dtbo_size = get_u32(1632)
+
+              if recovery_dtbo_size == 0:
+                  print("recovery_dtbo_size=0, set recovery_dtbo_offset=0")
+                  put_u64(1636, 0)
+              else:
+                  print("recovery_dtbo_size bukan 0, offset tidak diubah:", recovery_dtbo_size)
+          else:
+              print("header_version < 1 atau header terlalu kecil, tidak perlu fix recovery_dtbo_offset")
+
+          boot_out.write_bytes(data)
+          print("Wrote:", boot_out)
+          PY
 
           if [ -f dist/ReSukiSU-onclite-4.9-AnyKernel3.zip ]; then
             cp dist/ReSukiSU-onclite-4.9-AnyKernel3.zip dist/cyberc3dr-KernelSU-onclite-AnyKernel3.zip
           fi
 
+          echo ""
+          echo "==> Final dist files"
           ls -lh dist
 
       - name: Save ccache
@@ -267,6 +380,11 @@ jobs:
           path: |
             dist/*
             out/.config
+            fetch_source.log
+            prepare_defconfig.log
+            enable_kernelsu_config.log
             build_kernel.log
+            pack_anykernel.log
+            repack_boot.log
             ccache_stats.txt
             ccache_stats_before.txt
